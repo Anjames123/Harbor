@@ -1,0 +1,22 @@
+import { useState, type ReactNode } from 'react';
+import { BarChart3, ChevronRight, LogOut, Menu, Shield, Users, X } from 'lucide-react';
+import { Link, useLocation } from 'wouter';
+import { useAuth } from '@/components/auth-context';
+import { Brand } from '@/components/brand';
+
+export function AppShell({ children, title, eyebrow }: { children: ReactNode; title: string; eyebrow: string }) {
+  const { user, logout, isLoggingOut } = useAuth(); const [open, setOpen] = useState(false); const [, setLocation] = useLocation();
+  const signOut = async () => { try { await logout(); setLocation('/login'); } catch { /* keep the session visible when the server cannot end it */ } };
+  return <div className="min-h-[100dvh] bg-[hsl(var(--background))] text-[hsl(var(--foreground))]">
+    {open && <button aria-label="Close navigation" className="fixed inset-0 z-30 bg-[hsl(var(--primary)/.35)] lg:hidden" onClick={() => setOpen(false)} data-testid="button-close-navigation" />}
+    <aside className={`fixed inset-y-0 left-0 z-40 flex w-[265px] -translate-x-full flex-col bg-[hsl(var(--sidebar))] p-6 text-[hsl(var(--sidebar-foreground))] transition-transform lg:translate-x-0 ${open ? 'translate-x-0' : ''}`}>
+      <div className="flex items-center justify-between"><Brand inverse href="/dashboard" /><button className="p-2 text-[hsl(var(--sidebar-foreground)/.6)] lg:hidden" onClick={() => setOpen(false)} data-testid="button-close-sidebar"><X size={18} /></button></div>
+      <div className="mt-16"><p className="mb-4 px-3 font-mono-ui text-[10px] uppercase tracking-[.2em] text-[hsl(var(--sidebar-foreground)/.45)]">Workspace</p><nav className="space-y-1">
+        <Link href="/dashboard" onClick={() => setOpen(false)} className="group flex items-center gap-3 rounded-xl bg-[hsl(var(--sidebar-accent))] px-3 py-3 text-sm font-bold" data-testid="link-dashboard"><BarChart3 size={17} className="text-[hsl(var(--sidebar-primary))]" /> Overview <ChevronRight size={14} className="ml-auto opacity-40" /></Link>
+        {user?.role === 'admin' && <Link href="/admin/users" onClick={() => setOpen(false)} className="group flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-[hsl(var(--sidebar-foreground)/.7)] hover:bg-[hsl(var(--sidebar-accent))] hover:text-[hsl(var(--sidebar-foreground))]" data-testid="link-admin-users"><Users size={17} /> People <ChevronRight size={14} className="ml-auto opacity-40" /></Link>}
+      </nav></div>
+      <div className="mt-auto space-y-5"><div className="rounded-2xl border border-[hsl(var(--sidebar-border))] bg-[hsl(var(--sidebar-accent)/.45)] p-4"><div className="mb-2 flex items-center gap-2 text-[hsl(var(--sidebar-primary))]"><Shield size={15} /><span className="font-mono-ui text-[10px] uppercase tracking-[.16em]">Protected</span></div><p className="text-xs leading-5 text-[hsl(var(--sidebar-foreground)/.62)]">Your workspace is guarded by Harbor’s secure access layer.</p></div><div className="flex items-center gap-3 border-t border-[hsl(var(--sidebar-border))] pt-5"><div className="grid size-9 shrink-0 place-items-center rounded-full bg-[hsl(var(--sidebar-primary))] text-xs font-extrabold text-[hsl(var(--sidebar-primary-foreground))]">{user?.name?.slice(0, 1).toUpperCase() ?? '?'}</div><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold" data-testid="text-sidebar-user">{user?.name ?? 'Account holder'}</p><p className="truncate text-[11px] text-[hsl(var(--sidebar-foreground)/.5)]">{user?.email}</p></div><button onClick={signOut} disabled={isLoggingOut} className="p-2 text-[hsl(var(--sidebar-foreground)/.5)] hover:text-[hsl(var(--sidebar-primary))]" aria-label="Sign out" data-testid="button-sign-out"><LogOut size={16} /></button></div></div>
+    </aside>
+    <div className="lg:pl-[265px]"><header className="flex items-center justify-between border-b border-[hsl(var(--border))] px-5 py-5 sm:px-8 lg:px-12"><button className="rounded-lg p-2 text-[hsl(var(--muted-foreground))] lg:hidden" onClick={() => setOpen(true)} data-testid="button-open-navigation"><Menu size={20} /></button><div className="ml-auto flex items-center gap-3 text-xs text-[hsl(var(--muted-foreground))]"><span className="hidden sm:inline">Signed in as</span><span className="font-semibold text-[hsl(var(--foreground))]" data-testid="text-header-user">{user?.email}</span><span className="size-1.5 rounded-full bg-[hsl(var(--accent-foreground))]" /></div></header><main className="mx-auto max-w-[1180px] px-5 py-9 sm:px-8 sm:py-12 lg:px-12">{children}</main></div>
+  </div>;
+}

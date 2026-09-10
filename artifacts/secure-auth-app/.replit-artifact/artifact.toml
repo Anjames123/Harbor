@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Secure Auth App"
+description = "A secure account foundation with registration, login, email verification, password recovery, and role-aware access for users and administrators."
+version = "1.0.0"
+id = "artifacts/secure-auth-app"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25900
+
+[services.development]
+run = "pnpm --filter @workspace/secure-auth-app run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/secure-auth-app", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/secure-auth-app/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25900"
+BASE_PATH = "/"
