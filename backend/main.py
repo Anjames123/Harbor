@@ -1,9 +1,10 @@
 import logging
 import re
 from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import RedirectResponse
@@ -11,13 +12,18 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.config import get_settings
-from backend.db import get_db
+from backend.db import SessionLocal, get_db
 from backend.email_service import send_action_email
 from backend.models import (
     AuthToken,
     Bookmark,
     Comment,
+    Conversation,
+    ConversationMember,
     Follow,
+    Message,
+    Notification,
+    NotificationPreference,
     Post,
     PostLike,
     Repost,
@@ -28,12 +34,19 @@ from backend.models import (
 from backend.object_storage import create_download_url, create_upload_url
 from backend.schemas import (
     AuthResponse,
+    ChatMessageResponse,
     CommentCreateInput,
     CommentResponse,
+    ConversationResponse,
+    ConversationUser,
     EmailInput,
     EmailTokenInput,
     LoginInput,
     MessageResponse,
+    MessageCreateInput,
+    NotificationPreferencesResponse,
+    NotificationPreferencesUpdateInput,
+    NotificationResponse,
     PasswordResetInput,
     PostCreateInput,
     PostResponse,
@@ -74,6 +87,41 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 bearer = HTTPBearer(auto_error=False)
+
+
+class ChatConnectionManager:
+    def __init__(self) -> None:
+        self.connections: dict[UUID, set[WebSocket]] = {}
+
+    async def connect(self, user_id: UUID, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.connections.setdefault(user_id, set()).add(websocket)
+
+    def disconnect(self, user_id: UUID, websocket: WebSocket) -> None:
+        sockets = self.connections.get(user_id)
+        if not sockets:
+            return
+        sockets.discard(websocket)
+        if not sockets:
+            self.connections.pop(user_id, None)
+
+    def is_online(self, user_id: UUID) -> bool:
+        return bool(self.connections.get(user_id))
+
+    async def send_user(self, user_id: UUID, payload: dict) -> None:
+        for websocket in list(self.connections.get(user_id, set())):
+            try:
+                await websocket.send_json(payload)
+            except Exception:
+                self.disconnect(user_id, websocket)
+
+    async def broadcast(self, payload: dict, exclude: UUID | None = None) -> None:
+        for user_id in list(self.connections):
+            if user_id != exclude:
+                await self.send_user(user_id, payload)
+
+
+chat_manager = ChatConnectionManager()
 
 
 @app.middleware("http")
@@ -123,6 +171,439 @@ def get_admin_user(user: User = Depends(get_current_user)) -> User:
     if user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Administrator access required")
     return user
+
+
+def conversation_user(db: Session, user: User) -> ConversationUser:
+    return ConversationUser(
+        **social_user(db, user, user).model_dump(),
+        is_online=chat_manager.is_online(user.id) or user.is_online,
+    )
+
+
+def message_response(db: Session, message: Message, viewer_id: UUID) -> ChatMessageResponse:
+    sender = db.get(User, message.sender_id)
+    if not sender:
+        raise HTTPException(status_code=500, detail="Message sender not found")
+    return ChatMessageResponse(
+        id=message.id,
+        conversationId=message.conversation_id,
+        content=message.content,
+        sender=conversation_user(db, sender),
+        createdAt=message.created_at,
+        readAt=message.read_at,
+        isMine=message.sender_id == viewer_id,
+    )
+
+
+def conversation_for_user(
+    db: Session, conversation_id: str | UUID, user_id: UUID
+) -> Conversation:
+    try:
+        parsed_id = UUID(str(conversation_id))
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found") from None
+    conversation = db.scalar(
+        select(Conversation)
+        .join(ConversationMember, ConversationMember.conversation_id == Conversation.id)
+        .where(Conversation.id == parsed_id, ConversationMember.user_id == user_id)
+    )
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+def other_member(db: Session, conversation: Conversation, user_id: UUID) -> User:
+    member = db.scalar(
+        select(ConversationMember)
+        .where(
+            ConversationMember.conversation_id == conversation.id,
+            ConversationMember.user_id != user_id,
+        )
+    )
+    other = db.get(User, member.user_id) if member else None
+    if not other:
+        raise HTTPException(status_code=404, detail="Conversation member not found")
+    return other
+
+
+def conversation_response(
+    db: Session, conversation: Conversation, viewer_id: UUID
+) -> ConversationResponse:
+    other = other_member(db, conversation, viewer_id)
+    last_message = db.scalar(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    unread_count = len(
+        db.scalars(
+            select(Message).where(
+                Message.conversation_id == conversation.id,
+                Message.sender_id != viewer_id,
+                Message.read_at.is_(None),
+            )
+        ).all()
+    )
+    return ConversationResponse(
+        id=conversation.id,
+        otherUser=conversation_user(db, other),
+        lastMessage=message_response(db, last_message, viewer_id) if last_message else None,
+        unreadCount=unread_count,
+        updatedAt=conversation.updated_at,
+    )
+
+
+def notification_response(
+    db: Session, notification: Notification
+) -> NotificationResponse:
+    actor = db.get(User, notification.actor_id) if notification.actor_id else None
+    return NotificationResponse(
+        id=notification.id,
+        type=notification.type,
+        title=notification.title,
+        body=notification.body,
+        actor=conversation_user(db, actor) if actor else None,
+        conversationId=notification.conversation_id,
+        messageId=notification.message_id,
+        isRead=notification.is_read,
+        createdAt=notification.created_at,
+    )
+
+
+def add_message_notification(
+    db: Session,
+    recipient_id: UUID,
+    actor_id: UUID,
+    conversation_id: UUID,
+    message: Message,
+    actor_name: str,
+) -> Notification | None:
+    preferences = db.get(NotificationPreference, recipient_id)
+    if preferences and not preferences.message_notifications:
+        return None
+    notification = Notification(
+        recipient_id=recipient_id,
+        actor_id=actor_id,
+        type="message",
+        title=f"New message from {actor_name}",
+        body=message.content[:140],
+        conversation_id=conversation_id,
+        message_id=message.id,
+    )
+    db.add(notification)
+    return notification
+
+
+def create_message(
+    db: Session, conversation: Conversation, sender: User, content: str
+) -> tuple[Message, User]:
+    normalized = content.strip()
+    if not normalized:
+        raise HTTPException(status_code=422, detail="Message cannot be empty")
+    recipient = other_member(db, conversation, sender.id)
+    message = Message(
+        conversation_id=conversation.id,
+        sender_id=sender.id,
+        content=normalized,
+    )
+    conversation.updated_at = datetime.now(UTC)
+    db.add(message)
+    db.flush()
+    add_message_notification(
+        db,
+        recipient_id=recipient.id,
+        actor_id=sender.id,
+        conversation_id=conversation.id,
+        message=message,
+        actor_name=sender.name,
+    )
+    db.commit()
+    db.refresh(message)
+    return message, recipient
+
+
+def websocket_user(token: str | None, db: Session) -> User | None:
+    if not token:
+        return None
+    try:
+        claims = decode_access_token(token)
+        jti = claims.get("jti")
+        user_id = user_id_from_claims(claims)
+    except (jwt.InvalidTokenError, ValueError):
+        return None
+    if not isinstance(jti, str) or db.get(RevokedToken, jti):
+        return None
+    return db.get(User, user_id)
+
+
+@app.get("/api/conversations", response_model=list[ConversationResponse])
+def list_conversations(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[ConversationResponse]:
+    conversations = db.scalars(
+        select(Conversation)
+        .join(ConversationMember, ConversationMember.conversation_id == Conversation.id)
+        .where(ConversationMember.user_id == user.id)
+        .order_by(Conversation.updated_at.desc())
+    ).all()
+    return [conversation_response(db, conversation, user.id) for conversation in conversations]
+
+
+@app.post("/api/conversations/direct/{user_id}", response_model=ConversationResponse)
+def start_direct_conversation(
+    user_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ConversationResponse:
+    if str(user.id) == user_id:
+        raise HTTPException(status_code=400, detail="You cannot message yourself")
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    existing = None
+    candidate_ids = db.scalars(
+        select(ConversationMember.conversation_id).where(
+            ConversationMember.user_id == user.id
+        )
+    ).all()
+    for conversation_id in candidate_ids:
+        member_ids = set(
+            db.scalars(
+                select(ConversationMember.user_id).where(
+                    ConversationMember.conversation_id == conversation_id
+                )
+            ).all()
+        )
+        if member_ids == {user.id, target.id}:
+            existing = db.get(Conversation, conversation_id)
+            break
+    if not existing:
+        existing = Conversation()
+        db.add(existing)
+        db.flush()
+        db.add_all(
+            [
+                ConversationMember(conversation_id=existing.id, user_id=user.id),
+                ConversationMember(conversation_id=existing.id, user_id=target.id),
+            ]
+        )
+        db.commit()
+        db.refresh(existing)
+    return conversation_response(db, existing, user.id)
+
+
+@app.get("/api/conversations/{conversation_id}/messages", response_model=list[ChatMessageResponse])
+def list_messages(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[ChatMessageResponse]:
+    conversation = conversation_for_user(db, conversation_id, user.id)
+    messages = db.scalars(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc())
+        .limit(100)
+    ).all()
+    return [message_response(db, message, user.id) for message in messages]
+
+
+@app.post("/api/conversations/{conversation_id}/messages", response_model=ChatMessageResponse, status_code=201)
+async def send_message(
+    conversation_id: str,
+    payload: MessageCreateInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ChatMessageResponse:
+    conversation = conversation_for_user(db, conversation_id, user.id)
+    message, recipient = create_message(db, conversation, user, payload.content)
+    response = message_response(db, message, user.id)
+    serialized = {"type": "message", "message": response.model_dump(mode="json", by_alias=True)}
+    await chat_manager.send_user(user.id, serialized)
+    await chat_manager.send_user(recipient.id, serialized)
+    return response
+
+
+@app.post("/api/conversations/{conversation_id}/read", response_model=MessageResponse)
+async def mark_conversation_read(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    conversation = conversation_for_user(db, conversation_id, user.id)
+    now = datetime.now(UTC)
+    db.query(Message).filter(
+        Message.conversation_id == conversation.id,
+        Message.sender_id != user.id,
+        Message.read_at.is_(None),
+    ).update({Message.read_at: now}, synchronize_session=False)
+    member = db.scalar(
+        select(ConversationMember).where(
+            ConversationMember.conversation_id == conversation.id,
+            ConversationMember.user_id == user.id,
+        )
+    )
+    if member:
+        member.last_read_at = now
+    db.commit()
+    other = other_member(db, conversation, user.id)
+    await chat_manager.send_user(
+        other.id,
+        {
+            "type": "read",
+            "conversationId": str(conversation.id),
+            "userId": str(user.id),
+            "readAt": now.isoformat(),
+        },
+    )
+    return MessageResponse(message="Conversation marked as read")
+
+
+@app.get("/api/notifications", response_model=list[NotificationResponse])
+def list_notifications(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[NotificationResponse]:
+    notifications = db.scalars(
+        select(Notification)
+        .where(Notification.recipient_id == user.id)
+        .order_by(Notification.created_at.desc())
+        .limit(100)
+    ).all()
+    return [notification_response(db, notification) for notification in notifications]
+
+
+@app.post("/api/notifications/read", response_model=MessageResponse)
+def mark_notifications_read(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    db.query(Notification).filter(
+        Notification.recipient_id == user.id,
+        Notification.is_read.is_(False),
+    ).update({Notification.is_read: True}, synchronize_session=False)
+    db.commit()
+    return MessageResponse(message="Notifications marked as read")
+
+
+@app.get("/api/notification-preferences", response_model=NotificationPreferencesResponse)
+def get_notification_preferences(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> NotificationPreferencesResponse:
+    preferences = db.get(NotificationPreference, user.id)
+    if not preferences:
+        preferences = NotificationPreference(user_id=user.id)
+        db.add(preferences)
+        db.commit()
+        db.refresh(preferences)
+    return NotificationPreferencesResponse.model_validate(preferences, from_attributes=True)
+
+
+@app.patch("/api/notification-preferences", response_model=NotificationPreferencesResponse)
+def update_notification_preferences(
+    payload: NotificationPreferencesUpdateInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> NotificationPreferencesResponse:
+    preferences = db.get(NotificationPreference, user.id)
+    if not preferences:
+        preferences = NotificationPreference(user_id=user.id)
+        db.add(preferences)
+    for field, value in payload.model_dump(exclude_unset=True, by_alias=False).items():
+        if value is not None:
+            setattr(preferences, field, value)
+    db.commit()
+    db.refresh(preferences)
+    return NotificationPreferencesResponse.model_validate(preferences, from_attributes=True)
+
+
+@app.websocket("/ws/chat")
+async def chat_websocket(websocket: WebSocket) -> None:
+    db = SessionLocal()
+    user = websocket_user(websocket.query_params.get("token"), db)
+    if not user:
+        await websocket.close(code=4401)
+        db.close()
+        return
+    await chat_manager.connect(user.id, websocket)
+    user.is_online = True
+    db.commit()
+    await chat_manager.broadcast(
+        {"type": "presence", "userId": str(user.id), "isOnline": True},
+        exclude=user.id,
+    )
+    try:
+        while True:
+            event = await websocket.receive_json()
+            event_type = event.get("type")
+            if event_type == "message":
+                conversation = conversation_for_user(db, event.get("conversationId"), user.id)
+                message, recipient = create_message(db, conversation, user, str(event.get("content", "")))
+                payload = {
+                    "type": "message",
+                    "message": message_response(db, message, user.id).model_dump(
+                        mode="json", by_alias=True
+                    ),
+                }
+                await chat_manager.send_user(user.id, payload)
+                await chat_manager.send_user(recipient.id, payload)
+            elif event_type == "typing":
+                conversation = conversation_for_user(db, event.get("conversationId"), user.id)
+                recipient = other_member(db, conversation, user.id)
+                await chat_manager.send_user(
+                    recipient.id,
+                    {
+                        "type": "typing",
+                        "conversationId": str(conversation.id),
+                        "userId": str(user.id),
+                        "isTyping": bool(event.get("isTyping")),
+                    },
+                )
+            elif event_type == "read":
+                conversation = conversation_for_user(db, event.get("conversationId"), user.id)
+                now = datetime.now(UTC)
+                db.query(Message).filter(
+                    Message.conversation_id == conversation.id,
+                    Message.sender_id != user.id,
+                    Message.read_at.is_(None),
+                ).update({Message.read_at: now}, synchronize_session=False)
+                member = db.scalar(
+                    select(ConversationMember).where(
+                        ConversationMember.conversation_id == conversation.id,
+                        ConversationMember.user_id == user.id,
+                    )
+                )
+                if member:
+                    member.last_read_at = now
+                db.commit()
+                recipient = other_member(db, conversation, user.id)
+                await chat_manager.send_user(
+                    recipient.id,
+                    {
+                        "type": "read",
+                        "conversationId": str(conversation.id),
+                        "userId": str(user.id),
+                        "readAt": now.isoformat(),
+                    },
+                )
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Chat websocket failed for user %s", user.id)
+    finally:
+        chat_manager.disconnect(user.id, websocket)
+        if not chat_manager.is_online(user.id):
+            user.is_online = False
+            user.last_seen_at = datetime.now(UTC)
+            db.commit()
+            await chat_manager.broadcast(
+                {"type": "presence", "userId": str(user.id), "isOnline": False},
+                exclude=user.id,
+            )
+        db.close()
 
 
 def issue_one_time_token(

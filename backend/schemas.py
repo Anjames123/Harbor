@@ -130,3 +130,63 @@ class UploadUrlInput(BaseModel):
 class UploadUrlResponse(BaseModel):
     upload_url: str = Field(alias="uploadURL")
     object_path: str = Field(alias="objectPath")
+
+
+class ConversationUser(SocialUser):
+    is_online: bool = Field(default=False, alias="isOnline")
+
+
+class ChatMessageResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    id: UUID
+    conversation_id: UUID = Field(alias="conversationId")
+    content: str
+    sender: ConversationUser
+    created_at: datetime = Field(alias="createdAt")
+    read_at: datetime | None = Field(default=None, alias="readAt")
+    is_mine: bool = Field(default=False, alias="isMine")
+
+
+class ConversationResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    id: UUID
+    other_user: ConversationUser = Field(alias="otherUser")
+    last_message: ChatMessageResponse | None = Field(default=None, alias="lastMessage")
+    unread_count: int = Field(default=0, alias="unreadCount")
+    updated_at: datetime = Field(alias="updatedAt")
+
+
+class MessageCreateInput(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class NotificationResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    id: UUID
+    type: str
+    title: str
+    body: str
+    actor: ConversationUser | None = None
+    conversation_id: UUID | None = Field(default=None, alias="conversationId")
+    message_id: UUID | None = Field(default=None, alias="messageId")
+    is_read: bool = Field(alias="isRead")
+    created_at: datetime = Field(alias="createdAt")
+
+
+class NotificationPreferencesResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    message_notifications: bool = Field(alias="messageNotifications")
+    follow_notifications: bool = Field(alias="followNotifications")
+    interaction_notifications: bool = Field(alias="interactionNotifications")
+    email_notifications: bool = Field(alias="emailNotifications")
+
+
+class NotificationPreferencesUpdateInput(BaseModel):
+    message_notifications: bool | None = Field(default=None, alias="messageNotifications")
+    follow_notifications: bool | None = Field(default=None, alias="followNotifications")
+    interaction_notifications: bool | None = Field(default=None, alias="interactionNotifications")
+    email_notifications: bool | None = Field(default=None, alias="emailNotifications")
