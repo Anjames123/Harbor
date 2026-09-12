@@ -1,6 +1,6 @@
-# Secure Auth Foundation
+# Harbor Social Network
 
-Secure account foundation with registration, JWT login, email verification, password recovery, and role-aware access.
+Harbor is a social network with secure accounts, profiles, follows, posts, image uploads, likes, comments, replies, bookmarks, reposts, feeds, discovery, search, and hashtags.
 
 ## Run & Operate
 
@@ -12,6 +12,7 @@ Secure account foundation with registration, JWT login, email verification, pass
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - Required env: `DATABASE_URL` and `SESSION_SECRET`
 - Optional env: `FRONTEND_URL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`
+- Object Storage is provisioned for profile and post images; the API uses the Replit sidecar to issue signed upload and download URLs.
 
 ## Stack
 
@@ -20,6 +21,8 @@ Secure account foundation with registration, JWT login, email verification, pass
 - API: FastAPI + Uvicorn
 - DB: PostgreSQL + SQLAlchemy + Alembic
 - Auth: Argon2 password hashing + JWT bearer tokens
+- Social data: SQLAlchemy models with Alembic migrations for profiles, follows, posts, interactions, and threaded comments
+- Media: Replit App Storage signed URLs; image bytes are not stored in PostgreSQL
 - API codegen: Orval (from OpenAPI spec)
 - API docs: FastAPI OpenAPI at `/api/docs`
 
@@ -42,7 +45,9 @@ Secure account foundation with registration, JWT login, email verification, pass
 - Account registration and login
 - Email verification and resend flow
 - Password reset request and confirmation
-- Current-user dashboard
+- Social home feed, Explore, Search, profiles, and saved posts
+- Post composer with image uploads, hashtags, likes, comments, replies, bookmarks, and reposts
+- Profile editing with username, bio, and profile picture
 - Administrator-only user list
 - JWT logout and basic security headers
 

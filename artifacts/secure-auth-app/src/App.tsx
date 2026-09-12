@@ -7,6 +7,10 @@ import NotFound from '@/pages/not-found';
 import { AuthProvider, useAuth } from '@/components/auth-context';
 import { LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, VerifyEmailPage } from '@/pages/auth';
 import { DashboardPage } from '@/pages/dashboard';
+import { ExplorePage } from '@/pages/explore';
+import { SearchPage } from '@/pages/search';
+import { ProfilePage } from '@/pages/profile';
+import { BookmarksPage } from '@/pages/bookmarks';
 import { AdminUsersPage } from '@/pages/admin-users';
 import {
   Route,
@@ -47,6 +51,10 @@ function Router() {
         <Route path="/reset-password" component={ResetPasswordPage} />
         <Route path="/verify-email" component={VerifyEmailPage} />
         <Route path="/dashboard">{() => <Protected><DashboardPage /></Protected>}</Route>
+         <Route path="/explore">{() => <Protected><ExplorePage /></Protected>}</Route>
+         <Route path="/search">{() => <Protected><SearchPage /></Protected>}</Route>
+         <Route path="/profile/:id">{() => <Protected><ProfilePage /></Protected>}</Route>
+         <Route path="/bookmarks">{() => <Protected><BookmarksPage /></Protected>}</Route>
         <Route path="/admin/users">{() => <Protected><AdminUsersPage /></Protected>}</Route>
         <Route component={NotFound} />
       </Switch>

@@ -464,3 +464,36 @@
 }
 .font-display { font-family: var(--app-font-serif); }
 .font-mono-ui { font-family: var(--app-font-mono); }
+
+/* Harbor social surface — tactile, sunlit, and a little editorial. */
+.social-canvas {
+  background:
+    radial-gradient(circle at 8% 5%, hsl(var(--accent) / .16), transparent 28rem),
+    radial-gradient(circle at 90% 15%, hsl(33 84% 65% / .10), transparent 24rem),
+    hsl(var(--background));
+}
+.social-card {
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card) / .92);
+  box-shadow: 0 12px 32px hsl(193 46% 16% / .055);
+}
+.social-card:hover { box-shadow: 0 16px 38px hsl(193 46% 16% / .09); }
+.text-balance { text-wrap: balance; }
+.action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  border-radius: 999px;
+  padding: .5rem .65rem;
+  font-weight: 700;
+}
+.action-button:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.active-like { color: hsl(var(--destructive)); }
+.active-repost { color: hsl(var(--accent-foreground)); }
+.active-save { color: hsl(var(--primary)); }
+.skeleton-shimmer {
+  background: linear-gradient(100deg, hsl(var(--muted)) 35%, hsl(var(--card)) 50%, hsl(var(--muted)) 65%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }

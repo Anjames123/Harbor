@@ -1,25 +1,48 @@
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from fastapi.responses import RedirectResponse
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.config import get_settings
 from backend.db import get_db
 from backend.email_service import send_action_email
-from backend.models import AuthToken, RevokedToken, User, UserRole
+from backend.models import (
+    AuthToken,
+    Bookmark,
+    Comment,
+    Follow,
+    Post,
+    PostLike,
+    Repost,
+    RevokedToken,
+    User,
+    UserRole,
+)
+from backend.object_storage import create_download_url, create_upload_url
 from backend.schemas import (
     AuthResponse,
+    CommentCreateInput,
+    CommentResponse,
     EmailInput,
     EmailTokenInput,
     LoginInput,
     MessageResponse,
     PasswordResetInput,
+    PostCreateInput,
+    PostResponse,
+    ProfileUpdateInput,
+    ProfileResponse,
     RegisterInput,
+    SocialUser,
+    UploadUrlInput,
+    UploadUrlResponse,
     UserResponse,
 )
 from backend.security import (
@@ -152,7 +175,19 @@ def register(payload: RegisterInput, db: Session = Depends(get_db)) -> AuthRespo
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="An account with this email already exists")
 
-    user = User(name=payload.name.strip(), email=email, password_hash=hash_password(payload.password))
+    name = payload.name.strip()
+    username_base = re.sub(r"[^a-z0-9_]", "", name.lower().replace(" ", "_"))[:24] or "member"
+    username = username_base
+    suffix = 1
+    while db.scalar(select(User).where(User.username == username)):
+        username = f"{username_base[:28 - len(str(suffix))]}{suffix}"
+        suffix += 1
+    user = User(
+        name=name,
+        username=username,
+        email=email,
+        password_hash=hash_password(payload.password),
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -272,3 +307,393 @@ def list_users(
 ) -> list[UserResponse]:
     users = db.scalars(select(User).order_by(User.created_at.desc())).all()
     return [public_user(user) for user in users]
+
+
+def social_user(db: Session, user: User, viewer: User) -> SocialUser:
+    followers_count = db.scalar(
+        select(func.count()).select_from(Follow).where(Follow.following_id == user.id)
+    ) or 0
+    following_count = db.scalar(
+        select(func.count()).select_from(Follow).where(Follow.follower_id == user.id)
+    ) or 0
+    is_following = db.scalar(
+        select(Follow).where(
+            Follow.follower_id == viewer.id,
+            Follow.following_id == user.id,
+        )
+    ) is not None
+    return SocialUser(
+        id=user.id,
+        name=user.name,
+        username=user.username,
+        bio=user.bio,
+        avatar_path=user.avatar_path,
+        followers_count=followers_count,
+        following_count=following_count,
+        is_following=is_following,
+    )
+
+
+def comment_response(db: Session, comment: Comment, viewer: User) -> CommentResponse:
+    author = db.get(User, comment.author_id)
+    if not author:
+        raise HTTPException(status_code=500, detail="Comment author is missing")
+    return CommentResponse(
+        id=comment.id,
+        post_id=comment.post_id,
+        parent_id=comment.parent_id,
+        content=comment.content,
+        author=social_user(db, author, viewer),
+        created_at=comment.created_at,
+    )
+
+
+def post_response(db: Session, post: Post, viewer: User) -> PostResponse:
+    author = db.get(User, post.author_id)
+    if not author:
+        raise HTTPException(status_code=500, detail="Post author is missing")
+    likes_count = db.scalar(
+        select(func.count()).select_from(PostLike).where(PostLike.post_id == post.id)
+    ) or 0
+    comments_count = db.scalar(
+        select(func.count()).select_from(Comment).where(Comment.post_id == post.id)
+    ) or 0
+    reposts_count = db.scalar(
+        select(func.count()).select_from(Repost).where(Repost.post_id == post.id)
+    ) or 0
+    comments = db.scalars(
+        select(Comment)
+        .where(Comment.post_id == post.id, Comment.parent_id.is_(None))
+        .order_by(Comment.created_at.asc())
+        .limit(3)
+    ).all()
+    return PostResponse(
+        id=post.id,
+        content=post.content,
+        image_path=post.image_path,
+        created_at=post.created_at,
+        author=social_user(db, author, viewer),
+        likes_count=likes_count,
+        comments_count=comments_count,
+        reposts_count=reposts_count,
+        is_liked=db.scalar(
+            select(PostLike).where(PostLike.post_id == post.id, PostLike.user_id == viewer.id)
+        ) is not None,
+        is_bookmarked=db.scalar(
+            select(Bookmark).where(Bookmark.post_id == post.id, Bookmark.user_id == viewer.id)
+        ) is not None,
+        is_reposted=db.scalar(
+            select(Repost).where(Repost.post_id == post.id, Repost.user_id == viewer.id)
+        ) is not None,
+        comments=[comment_response(db, comment, viewer) for comment in comments],
+    )
+
+
+def discoverable_posts(db: Session, viewer: User, *, explore: bool = False) -> list[Post]:
+    if explore:
+        return db.scalars(select(Post).order_by(Post.created_at.desc()).limit(60)).all()
+    following_ids = db.scalars(
+        select(Follow.following_id).where(Follow.follower_id == viewer.id)
+    ).all()
+    author_ids = [viewer.id, *following_ids]
+    reposted_ids = db.scalars(
+        select(Repost.post_id).where(Repost.user_id.in_(author_ids))
+    ).all()
+    return db.scalars(
+        select(Post)
+        .where(or_(Post.author_id.in_(author_ids), Post.id.in_(reposted_ids)))
+        .order_by(Post.created_at.desc())
+        .limit(60)
+    ).all()
+
+
+@app.get("/api/feed", response_model=list[PostResponse])
+def home_feed(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[PostResponse]:
+    return [post_response(db, post, user) for post in discoverable_posts(db, user)]
+
+
+@app.get("/api/explore")
+def explore_feed(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, list]:
+    posts = discoverable_posts(db, user, explore=True)
+    seen: set = set()
+    people: list[SocialUser] = []
+    for post in posts:
+        author = db.get(User, post.author_id)
+        if author and author.id not in seen and author.id != user.id:
+            seen.add(author.id)
+            people.append(social_user(db, author, user))
+    return {
+        "posts": [post_response(db, post, user) for post in posts],
+        "users": people[:8],
+    }
+
+
+@app.get("/api/search")
+def search(
+    q: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, list]:
+    query = q.strip()
+    if not query:
+        return {"users": [], "posts": []}
+    term = f"%{query.lstrip('@#')}%"
+    users = db.scalars(
+        select(User)
+        .where(or_(User.name.ilike(term), User.username.ilike(term)))
+        .order_by(User.name.asc())
+        .limit(20)
+    ).all()
+    posts = db.scalars(
+        select(Post).where(Post.content.ilike(f"%{query}%")).order_by(Post.created_at.desc()).limit(30)
+    ).all()
+    return {
+        "users": [social_user(db, item, user) for item in users],
+        "posts": [post_response(db, item, user) for item in posts],
+    }
+
+
+def profile_response(db: Session, target: User, viewer: User) -> ProfileResponse:
+    posts = db.scalars(
+        select(Post).where(Post.author_id == target.id).order_by(Post.created_at.desc()).limit(60)
+    ).all()
+    return ProfileResponse(
+        **social_user(db, target, viewer).model_dump(),
+        posts=[post_response(db, post, viewer) for post in posts],
+    )
+
+
+@app.get("/api/users/me/profile", response_model=ProfileResponse)
+def my_profile(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ProfileResponse:
+    return profile_response(db, user, user)
+
+
+@app.patch("/api/users/me/profile", response_model=SocialUser)
+def update_profile(
+    payload: ProfileUpdateInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SocialUser:
+    data = payload.model_dump(exclude_unset=True, by_alias=False)
+    username = data.get("username")
+    if username:
+        existing = db.scalar(select(User).where(User.username == username, User.id != user.id))
+        if existing:
+            raise HTTPException(status_code=409, detail="That username is already taken")
+        data["username"] = username.lower()
+    for field, value in data.items():
+        setattr(user, field, value)
+    db.commit()
+    db.refresh(user)
+    return social_user(db, user, user)
+
+
+@app.get("/api/users/{user_id}", response_model=ProfileResponse)
+def get_profile(
+    user_id: str,
+    viewer: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SocialUser:
+    try:
+        target = db.get(User, user_id)
+    except (ValueError, TypeError):
+        target = None
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    return profile_response(db, target, viewer)
+
+
+@app.post("/api/users/{user_id}/follow", response_model=MessageResponse)
+def follow_user(
+    user_id: str,
+    viewer: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    if str(viewer.id) == user_id:
+        raise HTTPException(status_code=400, detail="You cannot follow yourself")
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if db.scalar(select(Follow).where(Follow.follower_id == viewer.id, Follow.following_id == target.id)):
+        return MessageResponse(message="Already following")
+    db.add(Follow(follower_id=viewer.id, following_id=target.id))
+    db.commit()
+    return MessageResponse(message="Following")
+
+
+@app.delete("/api/users/{user_id}/follow", response_model=MessageResponse)
+def unfollow_user(
+    user_id: str,
+    viewer: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    db.execute(
+        delete(Follow).where(Follow.follower_id == viewer.id, Follow.following_id == target.id)
+    )
+    db.commit()
+    return MessageResponse(message="Unfollowed")
+
+
+@app.post("/api/posts", response_model=PostResponse, status_code=201)
+def create_post(
+    payload: PostCreateInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PostResponse:
+    content = payload.content.strip()
+    if not content and not payload.image_path:
+        raise HTTPException(status_code=422, detail="A post needs text or an image")
+    if payload.image_path and not payload.image_path.startswith("/objects/"):
+        raise HTTPException(status_code=422, detail="Invalid image path")
+    post = Post(author_id=user.id, content=content, image_path=payload.image_path)
+    db.add(post)
+    db.commit()
+    db.refresh(post)
+    return post_response(db, post, user)
+
+
+def post_action(
+    db: Session,
+    model: type,
+    post_id: str,
+    user_id,
+    key: str = "post_id",
+) -> tuple[bool, Post]:
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    where = [getattr(model, key) == post.id, model.user_id == user_id]
+    record = db.scalar(select(model).where(*where))
+    if record:
+        db.delete(record)
+        active = False
+    else:
+        db.add(model(post_id=post.id, user_id=user_id))
+        active = True
+    db.commit()
+    return active, post
+
+
+@app.post("/api/posts/{post_id}/like", response_model=PostResponse)
+def toggle_like(
+    post_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PostResponse:
+    _, post = post_action(db, PostLike, post_id, user.id)
+    return post_response(db, post, user)
+
+
+@app.post("/api/posts/{post_id}/bookmark", response_model=PostResponse)
+def toggle_bookmark(
+    post_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PostResponse:
+    _, post = post_action(db, Bookmark, post_id, user.id)
+    return post_response(db, post, user)
+
+
+@app.post("/api/posts/{post_id}/repost", response_model=PostResponse)
+def toggle_repost(
+    post_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PostResponse:
+    _, post = post_action(db, Repost, post_id, user.id)
+    return post_response(db, post, user)
+
+
+@app.get("/api/bookmarks", response_model=list[PostResponse])
+def bookmarks(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[PostResponse]:
+    posts = db.scalars(
+        select(Post)
+        .join(Bookmark, Bookmark.post_id == Post.id)
+        .where(Bookmark.user_id == user.id)
+        .order_by(Bookmark.created_at.desc())
+    ).all()
+    return [post_response(db, post, user) for post in posts]
+
+
+@app.post("/api/posts/{post_id}/comments", response_model=CommentResponse, status_code=201)
+def add_comment(
+    post_id: str,
+    payload: CommentCreateInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CommentResponse:
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    comment = Comment(post_id=post.id, author_id=user.id, content=payload.content.strip())
+    db.add(comment)
+    db.commit()
+    db.refresh(comment)
+    return comment_response(db, comment, user)
+
+
+@app.get("/api/posts/{post_id}/comments", response_model=list[CommentResponse])
+def list_comments(
+    post_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[CommentResponse]:
+    comments = db.scalars(
+        select(Comment).where(Comment.post_id == post_id).order_by(Comment.created_at.asc())
+    ).all()
+    return [comment_response(db, comment, user) for comment in comments]
+
+
+@app.post("/api/comments/{comment_id}/replies", response_model=CommentResponse, status_code=201)
+def add_reply(
+    comment_id: str,
+    payload: CommentCreateInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CommentResponse:
+    parent = db.get(Comment, comment_id)
+    if not parent:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    reply = Comment(
+        post_id=parent.post_id,
+        parent_id=parent.id,
+        author_id=user.id,
+        content=payload.content.strip(),
+    )
+    db.add(reply)
+    db.commit()
+    db.refresh(reply)
+    return comment_response(db, reply, user)
+
+
+@app.post("/api/uploads/request-url", response_model=UploadUrlResponse)
+def request_upload_url(
+    payload: UploadUrlInput,
+    _: User = Depends(get_current_user),
+) -> UploadUrlResponse:
+    try:
+        upload_url, object_path = create_upload_url(payload.content_type)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return UploadUrlResponse(uploadURL=upload_url, objectPath=object_path)
+
+
+@app.get("/api/storage/objects/{object_path:path}")
+def serve_object(object_path: str) -> RedirectResponse:
+    try:
+        url = create_download_url(f"/objects/{object_path}")
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return RedirectResponse(url=url, status_code=307)
