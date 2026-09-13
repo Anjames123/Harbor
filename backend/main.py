@@ -271,25 +271,28 @@ def notification_response(
     )
 
 
-def add_message_notification(
+def add_user_notification(
     db: Session,
     recipient_id: UUID,
     actor_id: UUID,
-    conversation_id: UUID,
-    message: Message,
-    actor_name: str,
+    notification_type: str,
+    title: str,
+    body: str,
+    preference: str,
+    conversation_id: UUID | None = None,
+    message_id: UUID | None = None,
 ) -> Notification | None:
     preferences = db.get(NotificationPreference, recipient_id)
-    if preferences and not preferences.message_notifications:
+    if preferences and not getattr(preferences, preference):
         return None
     notification = Notification(
         recipient_id=recipient_id,
         actor_id=actor_id,
-        type="message",
-        title=f"New message from {actor_name}",
-        body=message.content[:140],
+        type=notification_type,
+        title=title,
+        body=body[:500],
         conversation_id=conversation_id,
-        message_id=message.id,
+        message_id=message_id,
     )
     db.add(notification)
     return notification
@@ -310,13 +313,16 @@ def create_message(
     conversation.updated_at = datetime.now(UTC)
     db.add(message)
     db.flush()
-    add_message_notification(
+    add_user_notification(
         db,
         recipient_id=recipient.id,
         actor_id=sender.id,
+        notification_type="message",
+        title=f"New message from {sender.name}",
+        body=message.content,
+        preference="message_notifications",
         conversation_id=conversation.id,
-        message=message,
-        actor_name=sender.name,
+        message_id=message.id,
     )
     db.commit()
     db.refresh(message)
@@ -1004,6 +1010,15 @@ def follow_user(
     if db.scalar(select(Follow).where(Follow.follower_id == viewer.id, Follow.following_id == target.id)):
         return MessageResponse(message="Already following")
     db.add(Follow(follower_id=viewer.id, following_id=target.id))
+    add_user_notification(
+        db,
+        recipient_id=target.id,
+        actor_id=viewer.id,
+        notification_type="follow",
+        title=f"{viewer.name} followed you",
+        body=f"@{viewer.username or viewer.name} is now following your posts.",
+        preference="follow_notifications",
+    )
     db.commit()
     return MessageResponse(message="Following")
 
@@ -1070,7 +1085,18 @@ def toggle_like(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> PostResponse:
-    _, post = post_action(db, PostLike, post_id, user.id)
+    active, post = post_action(db, PostLike, post_id, user.id)
+    if active and post.author_id != user.id:
+        add_user_notification(
+            db,
+            recipient_id=post.author_id,
+            actor_id=user.id,
+            notification_type="like",
+            title=f"{user.name} liked your post",
+            body="Someone in your harbor liked something you shared.",
+            preference="interaction_notifications",
+        )
+        db.commit()
     return post_response(db, post, user)
 
 
@@ -1090,7 +1116,18 @@ def toggle_repost(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> PostResponse:
-    _, post = post_action(db, Repost, post_id, user.id)
+    active, post = post_action(db, Repost, post_id, user.id)
+    if active and post.author_id != user.id:
+        add_user_notification(
+            db,
+            recipient_id=post.author_id,
+            actor_id=user.id,
+            notification_type="repost",
+            title=f"{user.name} reposted your post",
+            body="Your post is traveling a little further through the harbor.",
+            preference="interaction_notifications",
+        )
+        db.commit()
     return post_response(db, post, user)
 
 
@@ -1120,6 +1157,16 @@ def add_comment(
         raise HTTPException(status_code=404, detail="Post not found")
     comment = Comment(post_id=post.id, author_id=user.id, content=payload.content.strip())
     db.add(comment)
+    if post.author_id != user.id:
+        add_user_notification(
+            db,
+            recipient_id=post.author_id,
+            actor_id=user.id,
+            notification_type="comment",
+            title=f"{user.name} commented on your post",
+            body=comment.content,
+            preference="interaction_notifications",
+        )
     db.commit()
     db.refresh(comment)
     return comment_response(db, comment, user)
@@ -1154,6 +1201,16 @@ def add_reply(
         content=payload.content.strip(),
     )
     db.add(reply)
+    if parent.author_id != user.id:
+        add_user_notification(
+            db,
+            recipient_id=parent.author_id,
+            actor_id=user.id,
+            notification_type="reply",
+            title=f"{user.name} replied to your comment",
+            body=reply.content,
+            preference="interaction_notifications",
+        )
     db.commit()
     db.refresh(reply)
     return comment_response(db, reply, user)

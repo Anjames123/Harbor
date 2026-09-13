@@ -50,6 +50,7 @@ Harbor is a social network with secure accounts, profiles, follows, posts, image
 - Profile editing with username, bio, and profile picture
 - Administrator-only user list
 - JWT logout and basic security headers
+- Private conversations with WebSocket chat, presence, typing indicators, read receipts, unread counts, notifications, and notification preferences
 
 ## User preferences
 

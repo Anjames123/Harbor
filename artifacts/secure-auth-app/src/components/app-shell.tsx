@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { Compass, Heart, Bookmark, LogOut, Menu, Search, UserRound, Users, X, PenLine } from 'lucide-react';
+import { Compass, Heart, Bookmark, LogOut, Menu, Search, UserRound, Users, X, PenLine, MessageCircle, Bell } from 'lucide-react';
 import { Link, useLocation } from 'wouter';
 import { useAuth } from '@/components/auth-context';
 import { Brand } from '@/components/brand';
@@ -12,13 +12,15 @@ export function AppShell({ children, title, eyebrow }: { children: ReactNode; ti
     { href: '/explore', label: 'Explore', icon: Compass },
     { href: '/search', label: 'Search', icon: Search },
     { href: '/bookmarks', label: 'Saved', icon: Bookmark },
+    { href: '/messages', label: 'Messages', icon: MessageCircle },
+    { href: '/notifications', label: 'Notifications', icon: Bell },
   ];
   return <div className="min-h-[100dvh] bg-[hsl(var(--background))] text-[hsl(var(--foreground))]">
     {open && <button aria-label="Close navigation" className="fixed inset-0 z-30 bg-[hsl(var(--primary)/.35)] lg:hidden" onClick={() => setOpen(false)} data-testid="button-close-navigation" />}
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-[265px] -translate-x-full flex-col bg-[hsl(var(--sidebar))] p-6 text-[hsl(var(--sidebar-foreground))] transition-transform lg:translate-x-0 ${open ? 'translate-x-0' : ''}`}>
       <div className="flex items-center justify-between"><Brand inverse href="/dashboard" /><button className="p-2 text-[hsl(var(--sidebar-foreground)/.6)] lg:hidden" onClick={() => setOpen(false)} data-testid="button-close-sidebar"><X size={18} /></button></div>
        <div className="mt-16"><p className="mb-4 px-3 font-mono-ui text-[10px] uppercase tracking-[.2em] text-[hsl(var(--sidebar-foreground)/.45)]">The harbor</p><nav className="space-y-1">
-         {links.map(({ href, label, icon: Icon }) => <Link key={href} href={href} onClick={() => setOpen(false)} className={`group flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold transition ${location === href ? 'bg-[hsl(var(--sidebar-accent))] font-bold text-[hsl(var(--sidebar-foreground))]' : 'text-[hsl(var(--sidebar-foreground)/.68)] hover:bg-[hsl(var(--sidebar-accent))] hover:text-[hsl(var(--sidebar-foreground))]'}`} data-testid={`link-${label.toLowerCase().replace(' ', '-')}`}><Icon size={17} className={location === href ? 'text-[hsl(var(--sidebar-primary))]' : ''} />{label}</Link>)}
+          {links.map(({ href, label, icon: Icon }) => <Link key={href} href={href} onClick={() => setOpen(false)} className={`group flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold transition ${location === href ? 'bg-[hsl(var(--sidebar-accent))] font-bold text-[hsl(var(--sidebar-foreground))]' : 'text-[hsl(var(--sidebar-foreground)/.68)] hover:bg-[hsl(var(--sidebar-accent))] hover:text-[hsl(var(--sidebar-foreground))]'}`} data-testid={`link-${label.toLowerCase().replace(' ', '-')}`}><Icon size={17} className={location === href ? 'text-[hsl(var(--sidebar-primary))]' : ''} />{label}</Link>)}
          <Link href={user?.id ? `/profile/${user.id}` : '/dashboard'} onClick={() => setOpen(false)} className={`group flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold ${location.startsWith('/profile') ? 'bg-[hsl(var(--sidebar-accent))] text-[hsl(var(--sidebar-foreground))]' : 'text-[hsl(var(--sidebar-foreground)/.68)] hover:bg-[hsl(var(--sidebar-accent))]'}`}><UserRound size={17} /> Profile</Link>
          {user?.role === 'admin' && <Link href="/admin/users" onClick={() => setOpen(false)} className="group flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-[hsl(var(--sidebar-foreground)/.7)] hover:bg-[hsl(var(--sidebar-accent))]"><Users size={17} /> People</Link>}
        </nav></div>

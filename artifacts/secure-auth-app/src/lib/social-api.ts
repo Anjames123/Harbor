@@ -12,6 +12,7 @@ export type SocialUser = {
   followingCount?: number;
   postsCount?: number;
   isFollowing?: boolean;
+  isOnline?: boolean;
 };
 
 export type SocialComment = {
@@ -105,6 +106,41 @@ export const isReposted = (post: SocialPost) => Boolean(post.reposted ?? post.is
 export const avatarFor = (user?: SocialUser) => user?.avatarUrl ?? user?.avatarPath ?? user?.avatar_url ?? user?.avatar_path;
 export const objectUrl = (path?: string) => path ? (path.startsWith('http') || path.startsWith('/api/storage/') ? path : `/api/storage/${path.replace(/^\/+/, '')}`) : undefined;
 
+export type ConversationUser = SocialUser & { isOnline?: boolean };
+export type ChatMessage = {
+  id: string;
+  conversationId: string;
+  content: string;
+  sender: ConversationUser;
+  createdAt: string;
+  readAt?: string | null;
+  isMine?: boolean;
+};
+export type Conversation = {
+  id: string;
+  otherUser: ConversationUser;
+  lastMessage?: ChatMessage | null;
+  unreadCount: number;
+  updatedAt: string;
+};
+export type Notification = {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  actor?: ConversationUser | null;
+  conversationId?: string | null;
+  messageId?: string | null;
+  isRead: boolean;
+  createdAt: string;
+};
+export type NotificationPreferences = {
+  messageNotifications: boolean;
+  followNotifications: boolean;
+  interactionNotifications: boolean;
+  emailNotifications: boolean;
+};
+
 export function getFeed(token: string | null) { return socialRequest<unknown>('/api/feed', token).then((value) => unwrapList<SocialPost>(value, ['posts', 'items', 'results'])); }
 export function getExplore(token: string | null) { return socialRequest<unknown>('/api/explore', token).then((value) => ({ posts: unwrapList<SocialPost>(value, ['posts', 'items', 'results']), users: unwrapList<SocialUser>(value, ['users', 'people', 'suggestions']) })); }
 export function getBookmarks(token: string | null) { return socialRequest<unknown>('/api/bookmarks', token).then((value) => unwrapList<SocialPost>(value, ['posts', 'items', 'results'])); }
@@ -119,6 +155,37 @@ export function mutatePost(token: string | null, id: string, action: 'like' | 'b
 export function createComment(token: string | null, id: string, content: string) { return socialRequest<unknown>(`/api/posts/${encodeURIComponent(id)}/comments`, token, { method: 'POST', body: { content } }).then(unwrapEntity<SocialComment>); }
 export function createReply(token: string | null, id: string, content: string) { return socialRequest<unknown>(`/api/comments/${encodeURIComponent(id)}/replies`, token, { method: 'POST', body: { content } }).then(unwrapEntity<SocialComment>); }
 export function followUser(token: string | null, id: string, following: boolean) { return socialRequest<unknown>(`/api/users/${encodeURIComponent(id)}/follow`, token, { method: following ? 'DELETE' : 'POST' }); }
+
+export function getConversations(token: string | null) {
+  return socialRequest<Conversation[]>('/api/conversations', token);
+}
+export function startConversation(token: string | null, userId: string) {
+  return socialRequest<Conversation>(`/api/conversations/direct/${encodeURIComponent(userId)}`, token, { method: 'POST' });
+}
+export function getMessages(token: string | null, conversationId: string) {
+  return socialRequest<ChatMessage[]>(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, token);
+}
+export function sendMessage(token: string | null, conversationId: string, content: string) {
+  return socialRequest<ChatMessage>(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, token, {
+    method: 'POST',
+    body: { content },
+  });
+}
+export function markConversationRead(token: string | null, conversationId: string) {
+  return socialRequest<{ message: string }>(`/api/conversations/${encodeURIComponent(conversationId)}/read`, token, { method: 'POST' });
+}
+export function getNotifications(token: string | null) {
+  return socialRequest<Notification[]>('/api/notifications', token);
+}
+export function markNotificationsRead(token: string | null) {
+  return socialRequest<{ message: string }>('/api/notifications/read', token, { method: 'POST' });
+}
+export function getNotificationPreferences(token: string | null) {
+  return socialRequest<NotificationPreferences>('/api/notification-preferences', token);
+}
+export function updateNotificationPreferences(token: string | null, body: Partial<NotificationPreferences>) {
+  return socialRequest<NotificationPreferences>('/api/notification-preferences', token, { method: 'PATCH', body });
+}
 
 export async function uploadImage(token: string | null, file: File) {
   const requested = await socialRequest<unknown>('/api/uploads/request-url', token, {

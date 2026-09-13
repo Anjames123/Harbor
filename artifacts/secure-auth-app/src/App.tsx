@@ -12,6 +12,8 @@ import { SearchPage } from '@/pages/search';
 import { ProfilePage } from '@/pages/profile';
 import { BookmarksPage } from '@/pages/bookmarks';
 import { AdminUsersPage } from '@/pages/admin-users';
+import { MessagesPage } from '@/pages/messages';
+import { NotificationsPage } from '@/pages/notifications';
 import {
   Route,
   Switch,
@@ -55,6 +57,8 @@ function Router() {
          <Route path="/search">{() => <Protected><SearchPage /></Protected>}</Route>
          <Route path="/profile/:id">{() => <Protected><ProfilePage /></Protected>}</Route>
          <Route path="/bookmarks">{() => <Protected><BookmarksPage /></Protected>}</Route>
+         <Route path="/messages">{() => <Protected><MessagesPage /></Protected>}</Route>
+         <Route path="/notifications">{() => <Protected><NotificationsPage /></Protected>}</Route>
         <Route path="/admin/users">{() => <Protected><AdminUsersPage /></Protected>}</Route>
         <Route component={NotFound} />
       </Switch>
